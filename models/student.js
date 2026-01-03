@@ -7,10 +7,12 @@ const studentSchema = new mongoose.Schema(
     phone: { type: String, required: true },
     class: { type: String, required: true },
     message: { type: String },
-    registrationPaid: { type: Boolean, default: false }, 
+
+    registrationPaid: { type: Boolean, default: false },
+
     monthlyPayments: [
       {
-        amount: { type: Number, default: 200 },
+        amount: { type: Number, required: true }, 
         date: { type: Date, default: Date.now },
       },
     ],
