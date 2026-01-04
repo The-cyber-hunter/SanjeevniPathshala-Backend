@@ -1,19 +1,21 @@
 require("dotenv").config();
 const Razorpay = require("razorpay");
-const Student = require("../models/student");
 const crypto = require("crypto");
+const Student = require("../models/student");
 const sendEmail = require("../utils/sendemail");
 const generateReceipt = require("../utils/generateReceipt");
 
+// =========================
 // Razorpay instance
+// =========================
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
   key_secret: process.env.RAZORPAY_KEY_SECRET,
 });
 
-/* =========================
-   CLASS-WISE MONTHLY FEE
-   ========================= */
+// =========================
+// CLASS-WISE MONTHLY FEE
+// =========================
 const getMonthlyFee = (studentClass) => {
   const classNumber = parseInt(studentClass.replace(/\D/g, ""));
 
@@ -25,42 +27,59 @@ const getMonthlyFee = (studentClass) => {
   return 0;
 };
 
-// ---------------------
+// =========================
 // CREATE ORDER
-// ---------------------
+// =========================
 exports.createOrder = async (req, res) => {
   try {
-    const { email, type, name, phone, class: studentClass } = req.body;
+    const { name, email, phone, class: studentClass, type } = req.body;
 
-    if (!email || !type)
+    if (!name || !email || !phone || !studentClass || !type) {
       return res.status(400).json({ message: "Missing required fields" });
+    }
 
     let amount = 0;
 
-    // -------- REGISTRATION (FIXED ₹200) --------
+    // ---------- REGISTRATION ----------
     if (type === "registration") {
       amount = 200;
     }
 
-    // -------- MONTHLY (CLASS-WISE) --------
+    // ---------- MONTHLY ----------
     if (type === "monthly") {
-      const st = await Student.findOne({ email });
-      if (!st)
+      const student = await Student.findOne({
+        name,
+        email,
+        phone,
+        class: studentClass,
+      });
+
+      if (!student) {
         return res.status(400).json({ message: "Student not registered" });
-      if (!st.registrationPaid)
+      }
+
+      if (!student.registrationPaid) {
         return res.status(400).json({ message: "Complete registration first" });
+      }
 
       amount = getMonthlyFee(studentClass);
 
-      if (!amount)
+      if (!amount) {
         return res.status(400).json({ message: "Invalid class selected" });
+      }
     }
 
     const order = await razorpay.orders.create({
-      amount: amount * 100, // convert to paise
+      amount: amount * 100,
       currency: "INR",
       payment_capture: 1,
-      notes: { email, type, name, phone, class: studentClass },
+      notes: {
+        name,
+        email,
+        phone,
+        class: studentClass,
+        type,
+      },
     });
 
     res.status(200).json({ success: true, order });
@@ -70,15 +89,14 @@ exports.createOrder = async (req, res) => {
   }
 };
 
-// ---------------------
+// =========================
 // HANDLE WEBHOOK
-// ---------------------
+// =========================
 exports.handleWebhook = async (req, res) => {
   try {
     const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
-
-    const rawBody = req.body.toString();
     const signature = req.headers["x-razorpay-signature"];
+    const rawBody = req.body.toString();
 
     const expectedSignature = crypto
       .createHmac("sha256", secret)
@@ -87,7 +105,7 @@ exports.handleWebhook = async (req, res) => {
 
     if (expectedSignature !== signature) {
       console.log("❌ Webhook Signature Mismatch");
-      return res.status(400).json({ status: "invalid signature" });
+      return res.status(400).json({ status: "invalid_signature" });
     }
 
     console.log("✅ Webhook Verified");
@@ -98,12 +116,17 @@ exports.handleWebhook = async (req, res) => {
 
     if (!notes) return res.status(200).json({ status: "no_notes" });
 
-    const { email, type, name, phone, class: studentClass } = notes;
+    const { name, email, phone, class: studentClass, type } = notes;
     const amount = payment.amount / 100;
 
-    // -------- REGISTRATION --------
+    // ---------- REGISTRATION ----------
     if (type === "registration") {
-      let student = await Student.findOne({ email });
+      let student = await Student.findOne({
+        name,
+        email,
+        phone,
+        class: studentClass,
+      });
 
       if (!student) {
         student = await Student.create({
@@ -123,40 +146,73 @@ exports.handleWebhook = async (req, res) => {
       await sendEmail(
         student.email,
         "✅ Registration Receipt",
-        `<p>Hi ${name}, your registration is successful. Welcome to the Sanjeevni Pathshala family.</p>`,
+        `<p>Hi ${student.name}, your registration is successful.</p>`,
         [{ filename: "Receipt.pdf", content: pdfBuffer }]
       );
 
       await sendEmail(
         process.env.ADMIN_EMAIL,
-        "New Registration",
-        `Student registered: ${name} (${email})`,
+        "🆕 New Registration",
+        `Student registered: ${student.name} (${student.class})`,
         [{ filename: "Receipt.pdf", content: pdfBuffer }]
       );
     }
 
-    // -------- MONTHLY PAYMENT --------
+    // ---------- MONTHLY ----------
     if (type === "monthly") {
-      const student = await Student.findOne({ email });
-      if (!student)
-        return res.status(200).json({ status: "student_not_found" });
+      const student = await Student.findOne({
+        name,
+        email,
+        phone,
+        class: studentClass,
+      });
 
-      student.monthlyPayments.push({ amount, date: new Date() });
+      if (!student)
+        return res.status(400).json({ status: "student_not_found" });
+
+      if (!student.registrationPaid)
+        return res.status(400).json({ status: "registration_not_done" });
+
+      // Prevent double payment in same month
+      const now = new Date();
+      const currentMonth = now.getMonth();
+      const currentYear = now.getFullYear();
+
+      const alreadyPaid = student.monthlyPayments.some(
+        (p) =>
+          p.date.getMonth() === currentMonth &&
+          p.date.getFullYear() === currentYear
+      );
+
+      if (alreadyPaid) {
+        return res.status(400).json({
+          status: "already_paid",
+          message: "Monthly fee already paid for this month",
+        });
+      }
+
+      const feeAmount = getMonthlyFee(studentClass);
+
+      student.monthlyPayments.push({
+        amount: feeAmount,
+        date: new Date(),
+      });
+
       await student.save();
 
-      const pdfBuffer = await generateReceipt(student, type, amount);
+      const pdfBuffer = await generateReceipt(student, type, feeAmount);
 
       await sendEmail(
         student.email,
-        "Monthly Payment Receipt",
-        `<p>Hi ${student.name}, your monthly fee of ₹${amount} has been received.</p>`,
+        "💰 Monthly Fee Receipt",
+        `<p>Hi ${student.name}, your monthly fee of ₹${feeAmount} has been received.</p>`,
         [{ filename: "Receipt.pdf", content: pdfBuffer }]
       );
 
       await sendEmail(
         process.env.ADMIN_EMAIL,
         "💰 Monthly Fee Received",
-        `Monthly fee received from ${student.name} (₹${amount})`,
+        `Monthly fee received from ${student.name} (₹${feeAmount})`,
         [{ filename: "Receipt.pdf", content: pdfBuffer }]
       );
     }
