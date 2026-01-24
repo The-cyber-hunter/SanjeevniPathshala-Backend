@@ -96,24 +96,30 @@ exports.handleWebhook = async (req, res) => {
   try {
     const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
     const signature = req.headers["x-razorpay-signature"];
-    const rawBody = req.body.toString();
+    console.log("🔹 Secret used:", secret);
+    console.log("🔹 Received signature:", signature);
+    console.log("🔹 Raw body length:", req.body.length);
+    console.log("🔹 Raw body (first 200 chars):", req.body.toString().slice(0, 200));
 
     const expectedSignature = crypto
       .createHmac("sha256", secret)
-      .update(rawBody)
+      .update(req.body)
       .digest("hex");
 
     if (expectedSignature !== signature) {
       console.log("❌ Webhook Signature Mismatch");
+    console.log("Raw body:", req.body.toString());
+    console.log("Computed signature:", expectedSignature);
+    console.log("Received signature:", signature);
       return res.status(400).json({ status: "invalid_signature" });
     }
 
     console.log("✅ Webhook Verified");
 
-    const payload = JSON.parse(rawBody);
+    const payload = JSON.parse(req.body.toString());
     const payment = payload.payload.payment.entity;
     const notes = payment.notes;
-
+    console.log("Payload:", payload);
     if (!notes) return res.status(200).json({ status: "no_notes" });
 
     const { name, email, phone, class: studentClass, type } = notes;
@@ -121,40 +127,44 @@ exports.handleWebhook = async (req, res) => {
 
     // ---------- REGISTRATION ----------
     if (type === "registration") {
-      let student = await Student.findOne({
-        name,
-        email,
-        phone,
-        class: studentClass,
-      });
+  let student = await Student.findOne({
+    name,
+    email,
+    phone,
+    class: studentClass,
+  });
 
-      if (!student) {
-        student = await Student.create({
-          name,
-          email,
-          phone,
-          class: studentClass,
-          registrationPaid: true,
-        });
-      } else {
-        student.registrationPaid = true;
-        await student.save();
-      }
+  // 🔴 EXACT DUPLICATE → STOP HERE
+  if (student) {
+    return res.status(200).json({
+      status: "already_registered",
+      message: "Student already registered with same details",
+    });
+  }
 
-      const pdfBuffer = await generateReceipt(student, type, amount);
+  // 🟢 NOT FOUND → CREATE NEW ENTRY
+   student = await Student.create({
+    name,
+    email,
+    phone,
+    class: studentClass,
+    registrationPaid: true,
+  });
 
+      const studentPdf = await generateReceipt(student, type, amount, false);
+      const adminPdf = await generateReceipt(student, type, amount, true);
       await sendEmail(
         student.email,
         "✅ Registration Receipt",
-        `<p>Hi ${student.name}, your registration is successful.</p>`,
-        [{ filename: "Receipt.pdf", content: pdfBuffer }]
+        `<p>Hi ${student.name}, your registration is successful,Welcome to the Sanjeevni Pathshala family!!.</p>`,
+        [{ filename: "Receipt.pdf", content: studentPdf }]
       );
 
       await sendEmail(
         process.env.ADMIN_EMAIL,
         "🆕 New Registration",
         `Student registered: ${student.name} (${student.class})`,
-        [{ filename: "Receipt.pdf", content: pdfBuffer }]
+        [{ filename: "Receipt.pdf", content: adminPdf}]
       );
     }
 
@@ -200,20 +210,21 @@ exports.handleWebhook = async (req, res) => {
 
       await student.save();
 
-      const pdfBuffer = await generateReceipt(student, type, feeAmount);
+      const studentPdf = await generateReceipt(student, type, feeAmount, false);
+      const adminPdf = await generateReceipt(student, type, feeAmount, true);
 
       await sendEmail(
         student.email,
         "💰 Monthly Fee Receipt",
         `<p>Hi ${student.name}, your monthly fee of ₹${feeAmount} has been received.</p>`,
-        [{ filename: "Receipt.pdf", content: pdfBuffer }]
+        [{ filename: "Receipt.pdf", content: studentPdf }]
       );
 
       await sendEmail(
         process.env.ADMIN_EMAIL,
         "💰 Monthly Fee Received",
         `Monthly fee received from ${student.name} (₹${feeAmount})`,
-        [{ filename: "Receipt.pdf", content: pdfBuffer }]
+        [{ filename: "Receipt.pdf", content: adminPdf}]
       );
     }
 

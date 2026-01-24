@@ -19,11 +19,4 @@ const studentSchema = new mongoose.Schema(
   },
   { timestamps: true }
 );
-
-// ✅ Compound unique index (ALL details together)
-studentSchema.index(
-  { name: 1, email: 1, phone: 1, class: 1 },
-  { unique: true }
-);
-
 module.exports = mongoose.model("Student", studentSchema);
